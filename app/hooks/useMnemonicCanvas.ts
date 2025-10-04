@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { wordlists } from 'bip39';
-import fft from 'fft-js';
 
 export function useMnemonicCanvas(
   mnemonic: string | null,
@@ -24,14 +23,23 @@ export function useMnemonicCanvas(
     const words = mnemonic.split(' ');
     const indices = words.map(word => wordToIndex.get(word) ?? 0);
 
-    // Perform FFT
-    const fftSize = Math.pow(2, Math.ceil(Math.log2(indices.length)));
-    const paddedIndices = [...indices];
-    while (paddedIndices.length < fftSize) {
-      paddedIndices.push(0);
-    }
+    // Map each word index to [amplitude, phase]
+    // 2048 words = 32 rows × 64 columns
+    // row (0-31) → phase (0 to 2π)
+    // column (0-63) → amplitude (normalized)
+    const ROWS = 32;
+    const COLS = 64;
 
-    const fftCoeffs = fft.fft(paddedIndices);
+    const epicycles = indices.map(index => {
+      const row = Math.floor(index / COLS);  // 0-31
+      const col = index % COLS;              // 0-63
+
+      const phase = (row / ROWS) * 2 * Math.PI;  // 相位: 0 到 2π (32 个离散角度)
+      // 振幅映射到 0.1 到 1.0，避免零振幅
+      const amplitude = 0.1 + (col / COLS) * 0.9;  // 振幅: 0.1 到 1.0
+
+      return { amplitude, phase };
+    });
 
     // Clear canvas
     const width = canvas.width;
@@ -40,33 +48,43 @@ export function useMnemonicCanvas(
 
     // Set drawing style
     ctx.strokeStyle = '#3b82f6';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Calculate center and scale
+    // Calculate center and safe drawing area
     const centerX = width / 2;
     const centerY = height / 2;
-    const scale = Math.min(width, height) / 4;
 
-    // Draw the Fourier path
-    const numPoints = 1000;
+    // 计算理论最大半径（12个圆最坏情况同向叠加）
+    const maxTheoreticalRadius = epicycles.reduce((sum, e) => sum + e.amplitude, 0);
+
+    // 安全缩放：确保图形不超出Canvas的80%区域
+    const safeArea = Math.min(width, height) * 0.4;  // 使用40%作为安全半径
+    const baseScale = safeArea / maxTheoreticalRadius;
+
+    // Draw the epicycles path (周转圆轨迹)
+    const numPoints = 2000;
     ctx.beginPath();
 
     for (let i = 0; i < numPoints; i++) {
-      const time = (i / numPoints) * 2 * Math.PI;
+      const t = (i / numPoints) * 2 * Math.PI;
       let x = 0;
       let y = 0;
 
-      // Iterate over all Fourier coefficients
-      fftCoeffs.forEach((coeff, k) => {
-        const amplitude = (Math.sqrt(coeff[0] ** 2 + coeff[1] ** 2) / indices.length) * scale;
-        const phase = Math.atan2(coeff[1], coeff[0]);
-        const frequency = k > indices.length / 2 ? k - indices.length : k;
+      // Sum all epicycles (周转圆叠加)
+      epicycles.forEach((epicycle, k) => {
+        const { amplitude, phase } = epicycle;
 
-        // Add contribution from each epicycle
-        x += amplitude * Math.cos(frequency * time + phase);
-        y += amplitude * Math.sin(frequency * time + phase);
+        // 每个周转圆以不同的频率旋转
+        // 频率 = k (第 k 个单词对应第 k 个频率)
+        const frequency = k;
+        const angle = frequency * t + phase;
+
+        // 叠加每个圆的贡献
+        const radius = amplitude * baseScale;
+        x += radius * Math.cos(angle);
+        y += radius * Math.sin(angle);
       });
 
       if (i === 0) {
@@ -79,21 +97,20 @@ export function useMnemonicCanvas(
     ctx.closePath();
     ctx.stroke();
 
-    // Mark start point
+    // Mark start point (t=0)
     ctx.fillStyle = '#10b981';
     ctx.beginPath();
 
     let startX = 0;
     let startY = 0;
-    fftCoeffs.forEach((coeff, k) => {
-      const amplitude = (Math.sqrt(coeff[0] ** 2 + coeff[1] ** 2) / indices.length) * scale;
-      const phase = Math.atan2(coeff[1], coeff[0]);
-      const frequency = k > indices.length / 2 ? k - indices.length : k;
-      startX += amplitude * Math.cos(phase);
-      startY += amplitude * Math.sin(phase);
+
+    epicycles.forEach(({ amplitude, phase }) => {
+      const radius = amplitude * baseScale;
+      startX += radius * Math.cos(phase);
+      startY += radius * Math.sin(phase);
     });
 
-    ctx.arc(centerX + startX, centerY + startY, 6, 0, 2 * Math.PI);
+    ctx.arc(centerX + startX, centerY + startY, 8, 0, 2 * Math.PI);
     ctx.fill();
 
   }, [mnemonic, canvasRef]);
