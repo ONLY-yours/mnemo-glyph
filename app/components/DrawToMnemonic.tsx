@@ -8,6 +8,17 @@ import { useMnemonicCanvas } from '../hooks/useMnemonicCanvas';
 import Link from 'next/link';
 import type { Point } from '../utils/svgPathParser';
 
+type ImportedGraphic = {
+  type: 'svg';
+  name: string;
+  previewUrl: string;
+  backgroundUrl: string;
+  pathCount: number;
+  pointCount: number;
+  source: 'svg' | 'image';
+  dimensions?: { width: number; height: number };
+};
+
 export default function DrawToMnemonic() {
   const sketchRef = useRef<ReactSketchCanvasRef>(null);
   const canvasWrapperRef = useRef<HTMLDivElement>(null);
@@ -16,10 +27,7 @@ export default function DrawToMnemonic() {
   const [resultMnemonic, setResultMnemonic] = useState<string | null>(null);
   const resultCanvasRef = useRef<HTMLCanvasElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 400 });
-  const [svgPreviewUrl, setSvgPreviewUrl] = useState<string | null>(null);
-  const [importedSvgMeta, setImportedSvgMeta] = useState<
-    { name: string; pathCount: number; pointCount: number } | null
-  >(null);
+  const [importedGraphic, setImportedGraphic] = useState<ImportedGraphic | null>(null);
 
   useMnemonicCanvas(resultMnemonic, resultCanvasRef);
 
@@ -40,13 +48,26 @@ export default function DrawToMnemonic() {
     return () => observer.disconnect();
   }, []);
 
+  const disposeImportedGraphic = (graphic: ImportedGraphic | null) => {
+    if (!graphic) return;
+    const uniqueUrls = new Set<string>([graphic.backgroundUrl, graphic.previewUrl]);
+
+    uniqueUrls.forEach((url) => {
+      if (url?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          console.warn('释放导入资源失败:', error);
+        }
+      }
+    });
+  };
+
   useEffect(() => {
     return () => {
-      if (svgPreviewUrl) {
-        URL.revokeObjectURL(svgPreviewUrl);
-      }
+      disposeImportedGraphic(importedGraphic);
     };
-  }, [svgPreviewUrl]);
+  }, [importedGraphic]);
 
   const normalizeSvgPaths = (paths: Point[][]): Point[][] => {
     const flatPoints = paths.flat();
@@ -222,7 +243,7 @@ export default function DrawToMnemonic() {
 
       // 将点转换为 react-sketch-canvas 的路径格式
       const canvasPaths = normalizedPaths.map((path) => ({
-        drawMode: false,
+        drawMode: true,
         strokeColor: '#3b82f6',
         strokeWidth: 4,
         paths: path.map((point) => ({ x: point.x, y: point.y })),
@@ -237,16 +258,18 @@ export default function DrawToMnemonic() {
       setResultMnemonic(null);
       setProgress({ generation: 0, fitness: 0 });
 
-      const previewUrl = URL.createObjectURL(file);
-      setSvgPreviewUrl((previous) => {
-        if (previous) URL.revokeObjectURL(previous);
-        return previewUrl;
-      });
-
-      setImportedSvgMeta({
-        name: file.name,
-        pathCount: normalizedPaths.length,
-        pointCount: totalPoints,
+      const svgUrl = URL.createObjectURL(file);
+      setImportedGraphic((previous) => {
+        disposeImportedGraphic(previous);
+        return {
+          type: 'svg',
+          name: file.name,
+          previewUrl: svgUrl,
+          backgroundUrl: svgUrl,
+          pathCount: normalizedPaths.length,
+          pointCount: totalPoints,
+          source: 'svg',
+        };
       });
 
       // 清空file input
@@ -254,6 +277,149 @@ export default function DrawToMnemonic() {
     } catch (error) {
       console.error('❌ [SVG导入] 失败:', error);
       alert('SVG 导入失败，请确保文件格式正确');
+    }
+  };
+
+  const readFileAsDataUrl = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const loadImageElement = (src: string): Promise<HTMLImageElement> => {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.crossOrigin = 'anonymous';
+      image.src = src;
+    });
+  };
+
+  const handleImportImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('请选择 PNG/JPEG/WebP 等图片文件');
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const image = await loadImageElement(dataUrl);
+
+      const originalWidth = image.naturalWidth || image.width;
+      const originalHeight = image.naturalHeight || image.height;
+
+      if (!originalWidth || !originalHeight) {
+        throw new Error('图片尺寸异常');
+      }
+
+      const maxDimension = 512;
+      let targetWidth = originalWidth;
+      let targetHeight = originalHeight;
+      if (Math.max(targetWidth, targetHeight) > maxDimension) {
+        const scale = maxDimension / Math.max(targetWidth, targetHeight);
+        targetWidth = Math.max(1, Math.round(targetWidth * scale));
+        targetHeight = Math.max(1, Math.round(targetHeight * scale));
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error('无法获取绘图上下文');
+      }
+
+      ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+      const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+
+      const ImageTracerModule = await import('imagetracerjs');
+      const ImageTracer = (ImageTracerModule.default ?? ImageTracerModule) as any;
+
+      const traceOptions = {
+        numberofcolors: 6,
+        ltres: 1,
+        qtres: 1,
+        pathomit: 8,
+        strokewidth: 1,
+        linefilter: true,
+        rightangleenhance: true,
+      };
+
+      const svgString = ImageTracer.imagedataToSVG(imageData, traceOptions);
+      if (!svgString) {
+        throw new Error('矢量化失败，未获得 SVG 输出');
+      }
+
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(svgString, 'image/svg+xml');
+      if (svgDoc.querySelector('parsererror')) {
+        throw new Error('矢量化结果解析失败');
+      }
+
+      const pathElements = svgDoc.querySelectorAll('path');
+      const pathDataList = Array.from(pathElements)
+        .map((element) => element.getAttribute('d'))
+        .filter((d): d is string => !!d && d.trim().length > 0);
+
+      if (pathDataList.length === 0) {
+        throw new Error('矢量化结果未包含路径数据');
+      }
+
+      const { parseSVGPath } = await import('../utils/svgPathParser');
+      const parsedPaths = pathDataList
+        .map((data) => parseSVGPath(data))
+        .filter((points) => points.length > 0);
+
+      if (parsedPaths.length === 0) {
+        throw new Error('矢量化路径解析失败');
+      }
+
+      const normalizedPaths = normalizeSvgPaths(parsedPaths);
+      const totalPoints = normalizedPaths.reduce((acc, path) => acc + path.length, 0);
+
+      const canvasPaths = normalizedPaths.map((path) => ({
+        drawMode: true,
+        strokeColor: '#3b82f6',
+        strokeWidth: 4,
+        paths: path.map((point) => ({ x: point.x, y: point.y })),
+      }));
+
+      if (sketchRef.current) {
+        sketchRef.current.resetCanvas();
+        sketchRef.current.loadPaths(canvasPaths);
+      }
+
+      setResultMnemonic(null);
+      setProgress({ generation: 0, fitness: 0 });
+
+      const svgBlob = new Blob([svgString], { type: 'image/svg+xml' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+
+      setImportedGraphic((previous) => {
+        disposeImportedGraphic(previous);
+        return {
+          type: 'svg',
+          name: file.name,
+          previewUrl: svgUrl,
+          backgroundUrl: svgUrl,
+          pathCount: normalizedPaths.length,
+          pointCount: totalPoints,
+          source: 'image',
+          dimensions: { width: originalWidth, height: originalHeight },
+        };
+      });
+
+      event.target.value = '';
+    } catch (error) {
+      console.error('❌ [图片导入] 失败:', error);
+      alert('图片导入失败，请稍后重试或更换图片');
     }
   };
 
@@ -302,6 +468,10 @@ export default function DrawToMnemonic() {
     sketchRef.current?.clearCanvas();
     setResultMnemonic(null);
     setProgress({ generation: 0, fitness: 0 });
+    setImportedGraphic((previous) => {
+      disposeImportedGraphic(previous);
+      return null;
+    });
   };
 
   return (
@@ -338,6 +508,8 @@ export default function DrawToMnemonic() {
                   strokeWidth={4}
                   strokeColor="#3b82f6"
                   canvasColor="#ffffff"
+                  backgroundImage={importedGraphic?.backgroundUrl}
+                  preserveBackgroundImageAspectRatio="xMidYMid meet"
                 />
               </div>
               <div className="flex gap-3 mt-4">
@@ -387,28 +559,48 @@ export default function DrawToMnemonic() {
                     className="hidden"
                   />
                 </label>
+                <label className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors text-sm cursor-pointer text-center">
+                  🖼 导入图片
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={handleImportImage}
+                    className="hidden"
+                  />
+                </label>
               </div>
             </div>
 
-            {svgPreviewUrl && importedSvgMeta && (
+            {importedGraphic && (
               <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
                 <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-lg font-semibold text-white">导入的 SVG 预览</h2>
+                  <h2 className="text-lg font-semibold text-white">导入的素材预览</h2>
                   <span className="text-xs text-slate-300 truncate max-w-[60%]">
-                    {importedSvgMeta.name}
+                    {importedGraphic.name}
                   </span>
                 </div>
                 <div className="bg-white rounded border border-slate-200 overflow-hidden flex items-center justify-center h-48">
                   <img
-                    src={svgPreviewUrl}
-                    alt={importedSvgMeta.name}
+                    src={importedGraphic.previewUrl}
+                    alt={importedGraphic.name}
                     className="max-h-full max-w-full object-contain"
                   />
                 </div>
-                <div className="text-xs text-slate-400 mt-3 flex gap-4">
-                  <span>路径数: {importedSvgMeta.pathCount}</span>
-                  <span>采样点: {importedSvgMeta.pointCount}</span>
-                </div>
+                {importedGraphic.source === 'svg' && (
+                  <div className="text-xs text-slate-400 mt-3 flex gap-4">
+                    <span>路径数: {importedGraphic.pathCount}</span>
+                    <span>采样点: {importedGraphic.pointCount}</span>
+                  </div>
+                )}
+                {importedGraphic.source === 'image' && importedGraphic.dimensions && (
+                  <div className="text-xs text-slate-400 mt-3 flex gap-4">
+                    <span>来源: 栅格图像</span>
+                    <span>
+                      原始尺寸: {importedGraphic.dimensions.width}×
+                      {importedGraphic.dimensions.height}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
