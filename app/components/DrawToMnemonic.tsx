@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ReactSketchCanvas, ReactSketchCanvasRef } from 'react-sketch-canvas';
 import { pointsToEpicycles } from '../utils/fourierTransform';
 import { epicyclesToMnemonic } from '../utils/mnemonicToEpicycles';
@@ -10,12 +10,71 @@ import type { Point } from '../utils/svgPathParser';
 
 export default function DrawToMnemonic() {
   const sketchRef = useRef<ReactSketchCanvasRef>(null);
+  const canvasWrapperRef = useRef<HTMLDivElement>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState({ generation: 0, fitness: 0 });
   const [resultMnemonic, setResultMnemonic] = useState<string | null>(null);
   const resultCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 400 });
+  const [svgPreviewUrl, setSvgPreviewUrl] = useState<string | null>(null);
+  const [importedSvgMeta, setImportedSvgMeta] = useState<
+    { name: string; pathCount: number; pointCount: number } | null
+  >(null);
 
   useMnemonicCanvas(resultMnemonic, resultCanvasRef);
+
+  useEffect(() => {
+    const wrapper = canvasWrapperRef.current;
+    if (!wrapper || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      if (!entries.length) return;
+      const { width, height } = entries[0].contentRect;
+      if (!width || !height) return;
+      setCanvasSize({ width, height });
+    });
+
+    observer.observe(wrapper);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (svgPreviewUrl) {
+        URL.revokeObjectURL(svgPreviewUrl);
+      }
+    };
+  }, [svgPreviewUrl]);
+
+  const normalizeSvgPaths = (paths: Point[][]): Point[][] => {
+    const flatPoints = paths.flat();
+    if (flatPoints.length === 0) return paths;
+
+    const minX = Math.min(...flatPoints.map((point) => point.x));
+    const minY = Math.min(...flatPoints.map((point) => point.y));
+    const maxX = Math.max(...flatPoints.map((point) => point.x));
+    const maxY = Math.max(...flatPoints.map((point) => point.y));
+
+    const boundsWidth = maxX - minX || 1;
+    const boundsHeight = maxY - minY || 1;
+
+    const padding = 20;
+    const effectiveWidth = Math.max(canvasSize.width - padding * 2, 1);
+    const effectiveHeight = Math.max(canvasSize.height - padding * 2, 1);
+    const scale = Math.min(effectiveWidth / boundsWidth, effectiveHeight / boundsHeight);
+
+    const offsetX = (canvasSize.width - boundsWidth * scale) / 2;
+    const offsetY = (canvasSize.height - boundsHeight * scale) / 2;
+
+    return paths.map((path) =>
+      path.map((point) => ({
+        x: (point.x - minX) * scale + offsetX,
+        y: (point.y - minY) * scale + offsetY,
+      }))
+    );
+  };
 
   // 从绘图中提取点序列
   const extractPointsFromDrawing = async (): Promise<Point[]> => {
@@ -114,6 +173,90 @@ export default function DrawToMnemonic() {
     }
   };
 
+  // 导入 SVG 文件
+  const handleImportSVG = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      console.log('📄 [SVG导入] 原始内容:', text.substring(0, 200));
+
+      // 提取 SVG 中的 path 元素
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(text, 'image/svg+xml');
+      const pathElements = svgDoc.querySelectorAll('path');
+
+      if (svgDoc.querySelector('parsererror')) {
+        throw new Error('无法解析 SVG 文件');
+      }
+
+      console.log('📄 [SVG导入] 找到的 path 数量:', pathElements.length);
+
+      const pathDataList = Array.from(pathElements)
+        .map((element) => element.getAttribute('d'))
+        .filter((d): d is string => !!d && d.trim().length > 0);
+
+      if (pathDataList.length === 0) {
+        alert('SVG 文件中没有找到 path 元素！');
+        return;
+      }
+
+      console.log('📄 [SVG导入] Path data 样例:', pathDataList[0].substring(0, 200));
+
+      // 解析 SVG path 为点
+      const { parseSVGPath } = await import('../utils/svgPathParser');
+      const parsedPaths = pathDataList
+        .map((data) => parseSVGPath(data))
+        .filter((points) => points.length > 0);
+
+      if (parsedPaths.length === 0) {
+        alert('无法从 SVG path 中提取点！');
+        return;
+      }
+
+      const normalizedPaths = normalizeSvgPaths(parsedPaths);
+      const totalPoints = normalizedPaths.reduce((acc, path) => acc + path.length, 0);
+      console.log('📄 [SVG导入] 解析的总点数:', totalPoints);
+      console.log('📄 [SVG导入] 首条路径前5个点:', normalizedPaths[0].slice(0, 5));
+
+      // 将点转换为 react-sketch-canvas 的路径格式
+      const canvasPaths = normalizedPaths.map((path) => ({
+        drawMode: false,
+        strokeColor: '#3b82f6',
+        strokeWidth: 4,
+        paths: path.map((point) => ({ x: point.x, y: point.y })),
+      }));
+
+      // 加载到画布
+      if (sketchRef.current) {
+        sketchRef.current.resetCanvas();
+        sketchRef.current.loadPaths(canvasPaths);
+      }
+
+      setResultMnemonic(null);
+      setProgress({ generation: 0, fitness: 0 });
+
+      const previewUrl = URL.createObjectURL(file);
+      setSvgPreviewUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return previewUrl;
+      });
+
+      setImportedSvgMeta({
+        name: file.name,
+        pathCount: normalizedPaths.length,
+        pointCount: totalPoints,
+      });
+
+      // 清空file input
+      event.target.value = '';
+    } catch (error) {
+      console.error('❌ [SVG导入] 失败:', error);
+      alert('SVG 导入失败，请确保文件格式正确');
+    }
+  };
+
   const handleSolve = async () => {
     setIsProcessing(true);
     setResultMnemonic(null);
@@ -184,7 +327,10 @@ export default function DrawToMnemonic() {
           <div className="space-y-4">
             <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
               <h2 className="text-lg font-semibold text-white mb-3">绘图区域</h2>
-              <div className="bg-white rounded-lg overflow-hidden border-4 border-slate-600">
+              <div
+                ref={canvasWrapperRef}
+                className="bg-white rounded-lg overflow-hidden border-4 border-slate-600"
+              >
                 <ReactSketchCanvas
                   ref={sketchRef}
                   width="100%"
@@ -216,7 +362,7 @@ export default function DrawToMnemonic() {
               </div>
 
               {/* Import/Export Buttons */}
-              <div className="flex gap-3 mt-3">
+              <div className="flex flex-wrap gap-3 mt-3">
                 <button
                   onClick={handleExportDrawing}
                   className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors text-sm"
@@ -232,8 +378,39 @@ export default function DrawToMnemonic() {
                     className="hidden"
                   />
                 </label>
+                <label className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors text-sm cursor-pointer text-center">
+                  🧷 导入 SVG
+                  <input
+                    type="file"
+                    accept=".svg,image/svg+xml"
+                    onChange={handleImportSVG}
+                    className="hidden"
+                  />
+                </label>
               </div>
             </div>
+
+            {svgPreviewUrl && importedSvgMeta && (
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-lg font-semibold text-white">导入的 SVG 预览</h2>
+                  <span className="text-xs text-slate-300 truncate max-w-[60%]">
+                    {importedSvgMeta.name}
+                  </span>
+                </div>
+                <div className="bg-white rounded border border-slate-200 overflow-hidden flex items-center justify-center h-48">
+                  <img
+                    src={svgPreviewUrl}
+                    alt={importedSvgMeta.name}
+                    className="max-h-full max-w-full object-contain"
+                  />
+                </div>
+                <div className="text-xs text-slate-400 mt-3 flex gap-4">
+                  <span>路径数: {importedSvgMeta.pathCount}</span>
+                  <span>采样点: {importedSvgMeta.pointCount}</span>
+                </div>
+              </div>
+            )}
 
             {/* Solve Button */}
             <button

@@ -4,7 +4,7 @@ import { calculatePosition } from '../utils/fourierTransform';
 
 export function useMnemonicCanvas(
   mnemonic: string | null,
-  canvasRef: React.RefObject<HTMLCanvasElement>
+  canvasRef: React.RefObject<HTMLCanvasElement | null>
 ) {
   useEffect(() => {
     if (!mnemonic || !canvasRef.current) return;
