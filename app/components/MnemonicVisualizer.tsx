@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { generateMnemonic } from 'bip39';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import { useMnemonicCanvas } from '../hooks/useMnemonicCanvas';
+import Link from 'next/link';
 
 export default function MnemonicVisualizer() {
   const [mnemonic, setMnemonic] = useState<string | null>(null);
@@ -40,6 +41,14 @@ export default function MnemonicVisualizer() {
           <p className="text-sm text-slate-400 max-w-2xl mx-auto">
             将 BIP39 助记词转化为独一无二的几何图形，提供一种新颖的视觉记忆方式
           </p>
+          <div className="pt-2">
+            <Link
+              href="/draw"
+              className="inline-block px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white font-medium rounded-lg transition-colors"
+            >
+              🎨 尝试画图生成助记词 →
+            </Link>
+          </div>
         </div>
 
         {/* Canvas with Zoom/Pan */}
